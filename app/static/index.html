@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Топоотчет</title>
+  <meta name="description" content="Разбор топографической съемки и отчет по высотным отметкам">
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <main class="start" id="start">
+    <section class="start-card" id="dropzone">
+      <h1>Топоотчет</h1>
+      <p class="lead">Загрузите топографическую съемку. Приложение найдет высотные отметки и реквизиты, вы сверите их с листом и скачаете отчет.</p>
+      <label class="button primary" for="file-input">Выбрать файл</label>
+      <input class="visually-hidden" id="file-input" type="file" accept=".pdf,.jpg,.jpeg,.png,.tif,.tiff,application/pdf,image/jpeg,image/png,image/tiff">
+      <button class="button" id="sample-button" type="button">Открыть тестовый лист</button>
+      <p class="hint">PDF, JPEG, PNG или TIFF до 60 МБ. Можно перетащить файл сюда. Файл обрабатывается на этом компьютере.</p>
+      <p class="error" id="start-error" role="alert" hidden></p>
+    </section>
+  </main>
+
+  <main class="progress" id="progress" hidden>
+    <div class="progress-card" role="status">
+      <h1 id="progress-title">Читаю лист</h1>
+      <p id="progress-text">Скан или фото обычно занимает до минуты.</p>
+      <div class="progress-bar"><span></span></div>
+    </div>
+  </main>
+
+  <div class="workspace" id="workspace" hidden>
+    <header class="topbar">
+      <strong class="brand">Топоотчет</strong>
+      <div class="file-info">
+        <span id="file-name"></span>
+        <small id="file-method"></small>
+      </div>
+      <div class="actions">
+        <span class="pending" id="pending-note" hidden></span>
+        <button class="button primary" id="download-docx" type="button">Скачать DOCX</button>
+        <button class="button" id="download-pdf" type="button">Скачать PDF</button>
+        <button class="button quiet" id="new-file" type="button">Другой файл</button>
+      </div>
+    </header>
+
+    <section class="sheet-panel" aria-label="Лист съемки">
+      <div class="sheet-toolbar">
+        <div class="segmented" role="tablist" aria-label="Вид">
+          <button id="tab-sheet" role="tab" aria-selected="true" type="button">Лист</button>
+          <button id="tab-map" role="tab" aria-selected="false" type="button">Схема высот</button>
+        </div>
+        <div class="segmented" id="page-tabs" aria-label="Страницы" hidden></div>
+        <div class="zoom" id="sheet-tools">
+          <button class="button small" id="add-mark" type="button" aria-pressed="false">Добавить отметку</button>
+          <button class="button small icon" id="zoom-out" type="button" aria-label="Уменьшить">−</button>
+          <button class="button small icon" id="zoom-in" type="button" aria-label="Увеличить">+</button>
+          <button class="button small" id="zoom-fit" type="button">Весь лист</button>
+        </div>
+      </div>
+      <div class="sheet-view" id="sheet-view">
+        <div class="sheet-layer" id="sheet-layer"><img id="sheet-image" alt="Изображение загруженного листа" draggable="false"></div>
+        <div class="markers" id="markers"></div>
+        <p class="add-hint" id="add-hint" hidden>Нажмите на лист там, где стоит отметка.</p>
+      </div>
+      <div class="map-view" id="map-view" hidden>
+        <img id="map-image" alt="Схема высот, построенная по отметкам" hidden>
+        <p class="map-empty" id="map-empty">Для схемы нужно не меньше трех отметок, которые не лежат на одной прямой.</p>
+      </div>
+    </section>
+
+    <aside class="side-panel" aria-label="Проверка данных">
+      <section class="stamp" aria-label="Реквизиты и итоги">
+        <label class="cell span-6"><span>Документ</span><input data-meta="title" placeholder="не найдено"></label>
+        <label class="cell span-6"><span>Адрес или местоположение</span><input data-meta="address" placeholder="не найдено"></label>
+        <label class="cell span-3"><span>Кадастровые номера</span><input data-meta="cadastral_numbers" placeholder="не найдено"></label>
+        <label class="cell span-1 narrow"><span>Масштаб</span><input data-meta="scale" placeholder="1:500"></label>
+        <label class="cell span-2"><span>Сечение рельефа</span><input data-meta="relief_step" placeholder="не найдено"></label>
+        <label class="cell span-3"><span>Система высот</span><input data-meta="height_system" placeholder="не найдено"></label>
+        <label class="cell span-3"><span>Система координат</span><input data-meta="coordinate_system" placeholder="не найдено"></label>
+        <label class="cell span-2"><span>Дата съемки</span><input data-meta="survey_date" placeholder="не найдено"></label>
+        <label class="cell span-2"><span>Площадь</span><input data-meta="area" placeholder="не найдено"></label>
+        <label class="cell span-2"><span>Разрешение, dpi</span><input id="dpi-input" inputmode="numeric" placeholder="для уклона"></label>
+        <label class="cell span-6 last"><span>Исполнитель</span><input data-meta="contractor" placeholder="не найдено"></label>
+        <div class="result span-2"><span>Наименьшая</span><b id="stat-min">—</b></div>
+        <div class="result span-2"><span>Наибольшая</span><b id="stat-max">—</b></div>
+        <div class="result span-2 strong"><span>Перепад</span><b id="stat-spread">—</b></div>
+        <div class="result span-2"><span>Средняя</span><b id="stat-mean">—</b></div>
+        <div class="result span-4"><span>Уклон</span><b class="slope" id="stat-slope">—</b></div>
+      </section>
+
+      <ul class="warnings" id="warnings" hidden></ul>
+
+      <section class="ledger" aria-label="Ведомость отметок">
+        <div class="ledger-head">
+          <h2>Ведомость отметок</h2>
+          <div class="segmented" id="filters">
+            <button type="button" data-filter="all" aria-pressed="true">Все <span id="count-all">0</span></button>
+            <button type="button" data-filter="check" aria-pressed="false">Сверить <span id="count-check">0</span></button>
+            <button type="button" data-filter="excluded" aria-pressed="false">Исключены <span id="count-excluded">0</span></button>
+          </div>
+        </div>
+        <div class="ledger-scroll">
+          <table>
+            <thead>
+              <tr><th scope="col">В отчет</th><th scope="col">Отметка, м</th><th scope="col">Статус</th><th scope="col"><span class="visually-hidden">Действие</span></th></tr>
+            </thead>
+            <tbody id="ledger-rows"></tbody>
+          </table>
+          <p class="ledger-empty" id="ledger-empty" hidden></p>
+        </div>
+      </section>
+    </aside>
+  </div>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
