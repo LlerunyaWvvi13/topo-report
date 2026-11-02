@@ -100,6 +100,24 @@ def test_point_marker_read_as_digit_is_dropped():
     assert fixed.status == "check"
 
 
+def test_each_page_has_its_own_height_range():
+    first = Page(number=1, image=np.zeros((10, 10, 3), np.uint8), dpi=300)
+    second = Page(number=2, image=np.zeros((10, 10, 3), np.uint8), dpi=300)
+    marks = extract_marks(
+        [
+            (first, spread(["145.27", "146.31", "147.02", "147.80"])),
+            (second, spread(["310.10", "311.25", "312.40"])),
+        ]
+    )
+    assert all(mark.included and mark.status == "ok" for mark in marks)
+    assert [mark.id for mark in marks] == list(range(1, 8))
+
+
+def test_page_with_few_numbers_goes_to_review():
+    marks = read(spread(["12.50", "13.70"]))
+    assert all(mark.status == "check" for mark in marks)
+
+
 def test_no_numbers_gives_no_marks():
     assert read([item("Топографический"), item("план")]) == []
 
