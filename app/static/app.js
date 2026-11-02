@@ -92,8 +92,11 @@ function openResult(result) {
   byId("file-name").textContent = result.filename;
   byId("file-method").textContent = `Источник данных: ${result.method}`;
   document.querySelectorAll("[data-meta]").forEach((input) => { input.value = state.metadata[input.dataset.meta] || ""; });
-  const dpi = currentPage().dpi;
-  byId("dpi-input").value = dpi ? Math.round(dpi) : "";
+  const page = currentPage();
+  const dpiInput = byId("dpi-input");
+  dpiInput.value = page.dpi ? Math.round(page.dpi) : "";
+  dpiInput.disabled = page.rectified;
+  dpiInput.placeholder = page.rectified ? "фото" : "для уклона";
 
   const warnings = byId("warnings");
   warnings.replaceChildren(...result.warnings.map((text) => {
@@ -492,11 +495,16 @@ function renderSummary({ stats, slope, map }) {
   byId("stat-mean").textContent = text(stats?.mean);
   const slopeCell = byId("stat-slope");
   if (slope) {
-    slopeCell.textContent = `${formatValue(slope.mean_percent)} %, понижение на ${slope.direction}`;
+    slopeCell.textContent = slope.direction
+      ? `${formatValue(slope.mean_percent)} %, понижение на ${slope.direction}`
+      : "рельеф ровный";
     slopeCell.title = `Наибольший между соседними точками: ${formatValue(slope.max_percent)} %. Север считается верхом листа.`;
   } else {
-    slopeCell.textContent = "укажите масштаб и dpi";
-    slopeCell.title = "Для фото разрешение неизвестно, поэтому уклон не считается автоматически.";
+    const rectified = currentPage().rectified;
+    slopeCell.textContent = rectified ? "не считается для фото" : "укажите масштаб и dpi";
+    slopeCell.title = rectified
+      ? "После выравнивания фото масштаб неточен, поэтому уклон не рассчитывается."
+      : "Для расчета нужны масштаб плана и разрешение листа.";
   }
   const image = byId("map-image");
   image.hidden = !map;
