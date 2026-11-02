@@ -42,6 +42,13 @@ def test_lengths_outside_main_group_are_excluded():
     assert not any(mark.included for mark in doubtful.values())
 
 
+def test_second_group_on_a_slope_stays_for_review():
+    marks = read(spread(["100.25", "101.10", "101.80", "110.40", "111.05"]))
+    second = [mark for mark in marks if mark.value > 105]
+    assert len(second) == 2
+    assert all(mark.status == "check" and mark.included for mark in second)
+
+
 def test_dates_coordinates_and_integers_are_not_heights():
     marks = read(spread(["145.27", "146.31", "12.05.2024", "456000", "1320050", "150"]))
     assert [mark.value for mark in marks] == [145.27, 146.31]

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app import config
-from app.main import app
+from app.main import _analyses, app
 
 client = TestClient(app)
 TRUTH = json.loads((Path(__file__).parent.parent / "samples" / "sample_truth.json").read_text("utf-8"))
@@ -165,6 +165,62 @@ def test_upload_limit(monkeypatch):
     monkeypatch.setattr(config, "MAX_UPLOAD_BYTES", 10)
     response = upload(b"%PDF-" + b"0" * 100)
     assert response.status_code == 413
+
+
+def test_oversized_body_is_stopped_before_parsing(monkeypatch):
+    monkeypatch.setattr(config, "MAX_UPLOAD_BYTES", 10)
+    response = client.post(
+        "/api/analyses",
+        content=b"0" * 200_000,
+        headers={"content-type": "multipart/form-data; boundary=x"},
+    )
+    assert response.status_code == 413
+    assert "МБ" in response.json()["detail"]
+
+
+def test_chunked_body_without_length_is_stopped(monkeypatch):
+    monkeypatch.setattr(config, "MAX_UPLOAD_BYTES", 10)
+
+    def chunks():
+        for _ in range(30):
+            yield b"0" * 8192
+
+    response = client.post(
+        "/api/analyses",
+        content=chunks(),
+        headers={"content-type": "multipart/form-data; boundary=x"},
+    )
+    assert response.status_code == 413
+
+
+def test_full_size_page_is_not_kept_after_analysis(sample_pdf):
+    result = upload(sample_pdf).json()
+    analysis = _analyses[result["id"]]
+    assert not hasattr(analysis, "document")
+    assert all(len(page.preview) < 3_000_000 for page in analysis.pages.values())
+
+
+def test_rectified_photo_has_no_slope_even_with_manual_dpi(sample_photo):
+    result = upload(sample_photo, "фото.jpg").json()
+    assert result["pages"][0]["rectified"] is True
+    body = {**review_body(result), "dpi": 200}
+    summary = client.post(f"/api/analyses/{result['id']}/summary", json=body).json()
+    assert summary["slope"] is None
+    assert summary["stats"]["count"] > 0
+
+
+def test_flat_ground_builds_summary_and_report(sample_pdf):
+    result = upload(sample_pdf).json()
+    for mark in result["marks"]:
+        mark["value"] = 100.0
+        mark["included"] = True
+    body = review_body(result)
+    summary = client.post(f"/api/analyses/{result['id']}/summary", json=body).json()
+    assert summary["stats"]["spread"] == 0
+    assert summary["slope"]["direction"] is None
+    assert summary["map"]
+    response = client.post(f"/api/analyses/{result['id']}/report?format=pdf", json=body)
+    assert response.status_code == 200
 
 
 def test_huge_image_is_rejected(monkeypatch):

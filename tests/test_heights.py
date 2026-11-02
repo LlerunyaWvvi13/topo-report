@@ -60,6 +60,17 @@ def test_slope_needs_scale_and_non_collinear_points():
     assert slope_stats([0, 1, 2], [0, 1, 2], [1, 2, 3], 1.0) is None
 
 
+def test_flat_ground_has_no_direction():
+    slope = slope_stats([0, 100, 0, 100], [0, 0, 80, 80], [100.0] * 4, 0.5)
+    assert slope.mean_percent == 0
+    assert slope.direction is None
+
+
+def test_flat_ground_has_a_map():
+    png = height_map_png([0, 100, 0, 100], [0, 0, 80, 80], [100.0] * 4, 0.5, 0.5, 0.8)
+    assert png.startswith(b"\x89PNG")
+
+
 def test_height_map_is_png():
     png = height_map_png([0, 100, 0, 100], [0, 0, 80, 80], [10.0, 11.0, 12.0, 13.5], 0.5, 0.5, 0.8)
     assert png.startswith(b"\x89PNG")
