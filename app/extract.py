@@ -13,6 +13,7 @@ from .loader import Page, TextItem
 NUMBER = re.compile(r"[+]?\d{1,4}\.\d{1,3}")
 BARE_INTEGER = re.compile(r"\d{4,5}")
 LOOKALIKES = str.maketrans({"О": "0", "о": "0", "O": "0", "o": "0", "З": "3", "l": "1", "I": "1"})
+MIN_GROUP_SIZE = 3
 NON_HEIGHT_CONTEXT = re.compile(
     r"^(s=?|площад\w*|кв\.?м?|м2|м²|га|h=?|масштаб|лист\w*|стр\.?|№|сечени\w*|через)$",
     re.IGNORECASE,
@@ -184,13 +185,15 @@ def _without_marker_digit(candidates: list[_Candidate], allowed: _Range) -> list
 
 
 def extract_marks(pages: list[tuple[Page, list[TextItem]]]) -> list[Mark]:
-    decimal: list[_Candidate] = []
-    integers: list[_Candidate] = []
+    """Разбирает листы по отдельности: высоты на разных листах могут сильно различаться."""
+    marks: list[Mark] = []
     for page, items in pages:
-        page_decimal, page_integers = _candidates(page, items)
-        decimal.extend(page_decimal)
-        integers.extend(page_integers)
+        marks.extend(_extract_page_marks(page, items, first_id=len(marks) + 1))
+    return marks
 
+
+def _extract_page_marks(page: Page, items: list[TextItem], first_id: int) -> list[Mark]:
+    decimal, integers = _candidates(page, items)
     ranges = _elevation_ranges([candidate.value for candidate in decimal])
     if ranges is None:
         return []
@@ -201,16 +204,17 @@ def extract_marks(pages: list[tuple[Page, list[TextItem]]]) -> list[Mark]:
     in_core = [candidate for candidate in decimal if candidate.value in core]
     dominant = Counter(candidate.decimals for candidate in in_core).most_common(1)[0][0]
     trimmed = _without_marker_digit(decimal, wide)
+    few_marks = len(in_core) < MIN_GROUP_SIZE
 
     marks = []
-    for number, candidate in enumerate(
-        sorted(
-            _deduplicate(decimal + restored + trimmed, wide, dominant),
-            key=lambda c: (c.page, c.item.y, c.item.x),
-        ),
-        start=1,
-    ):
+    ordered = sorted(
+        _deduplicate(decimal + restored + trimmed, wide, dominant),
+        key=lambda candidate: (candidate.item.y, candidate.item.x),
+    )
+    for number, candidate in enumerate(ordered, start=first_id):
         status, note, included = _classify(candidate, core, wide, dominant)
+        if status == "ok" and few_marks:
+            status, note = "check", "На листе мало чисел: возможно, это не отметка"
         marks.append(
             Mark(
                 id=number,
