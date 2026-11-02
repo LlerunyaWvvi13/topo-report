@@ -36,6 +36,7 @@ class Page:
     image: np.ndarray
     dpi: float | None
     items: list[TextItem] = field(default_factory=list)
+    rectified: bool = False
 
     @property
     def height(self) -> int:
@@ -172,8 +173,11 @@ def _load_image(data: bytes, kind: str) -> Document:
     bgr, rectified = rectify_sheet(bgr)
     if rectified:
         dpi = None
-        warnings.append("Лист на фото выровнен автоматически. Проверьте положение отметок.")
-    return Document(kind, [Page(number=1, image=bgr, dpi=dpi)], warnings)
+        warnings.append(
+            "Лист на фото выровнен автоматически. Проверьте положение отметок. "
+            "Уклон для такого снимка не рассчитывается: масштаб после выравнивания неточен."
+        )
+    return Document(kind, [Page(number=1, image=bgr, dpi=dpi, rectified=rectified)], warnings)
 
 
 def _too_large_message() -> str:

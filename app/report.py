@@ -36,6 +36,7 @@ from reportlab.platypus import (
 from .heights import HeightStats, SlopeStats
 
 NOT_FOUND = "не определено"
+SHEET_MAX_SIDE = 2000
 INK = colors.HexColor("#14303d")
 MUTED = colors.HexColor("#55686f")
 RULE = colors.HexColor("#c4cfd2")
@@ -82,10 +83,14 @@ def number(value: float, digits: int = 2) -> str:
     return f"{value:.{digits}f}".replace(".", ",")
 
 
-def annotated_sheet(page_image: np.ndarray, marks: list[dict], page: int, max_side: int = 2000) -> bytes:
+def annotated_sheet(preview_jpeg: bytes, page_width: int, marks: list[dict], page: int) -> bytes:
     """Готовит изображение листа с номерами отметок из ведомости."""
-    scale = min(1.0, max_side / max(page_image.shape[:2]))
-    image = cv2.resize(page_image, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+    image = cv2.imdecode(np.frombuffer(preview_jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        return b""
+    limit = min(1.0, SHEET_MAX_SIDE / max(image.shape[:2]))
+    image = cv2.resize(image, None, fx=limit, fy=limit, interpolation=cv2.INTER_AREA)
+    scale = image.shape[1] / page_width
     font_scale = max(0.42, max(image.shape[:2]) / 3000)
     for mark in marks:
         if mark["page"] != page:
@@ -125,6 +130,12 @@ def _metadata_rows(data: ReportData) -> list[tuple[str, str]]:
     return rows
 
 
+def _direction_text(slope: SlopeStats) -> str:
+    if slope.direction is None:
+        return "не выражено: рельеф ровный"
+    return f"на {slope.direction}, если верх листа — север"
+
+
 def _height_rows(data: ReportData) -> list[tuple[str, str]]:
     if data.stats is None:
         return [("Отметки", "в отчет не включено ни одной отметки")]
@@ -142,10 +153,10 @@ def _height_rows(data: ReportData) -> list[tuple[str, str]]:
         rows += [
             ("Средний уклон участка", f"{number(data.slope.mean_percent)} % ({number(data.slope.mean_degrees)}°)"),
             ("Наибольший уклон между соседними точками", f"{number(data.slope.max_percent)} %"),
-            ("Понижение рельефа", f"на {data.slope.direction}, если верх листа — север"),
+            ("Понижение рельефа", _direction_text(data.slope)),
         ]
     else:
-        rows.append(("Уклон", "не рассчитан: нет масштаба или разрешения листа"))
+        rows.append(("Уклон", "не рассчитан: нет достоверного масштаба листа"))
     return rows
 
 

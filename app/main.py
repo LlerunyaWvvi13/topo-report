@@ -17,7 +17,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.middleware.trustedhost import TrustedHostMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import config
 from .extract import (
@@ -28,7 +30,7 @@ from .extract import (
     scale_denominator,
 )
 from .heights import height_map_png, height_stats, metres_per_pixel, slope_stats
-from .loader import Document, Page, TextItem, UnsupportedFile, load_document
+from .loader import Page, TextItem, UnsupportedFile, load_document
 from .ocr import OcrUnavailable, correct_orientation, read_page
 from .report import ReportData, annotated_sheet, build_docx, build_pdf
 
@@ -36,6 +38,7 @@ STATIC_DIR = Path(__file__).parent / "static"
 SAMPLE_FILE = Path(__file__).parent.parent / "samples" / "sample_plan.pdf"
 PREVIEW_MAX_SIDE = 2800
 UPLOAD_CHUNK = 1024 * 1024
+MULTIPART_OVERHEAD = 64 * 1024
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; img-src 'self' data: blob:; object-src 'none'; "
     "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
@@ -45,25 +48,87 @@ PAGE_MEDIA = {
     "pdf": "application/pdf",
 }
 
+
+
+def _too_large_message() -> str:
+    limit = config.MAX_UPLOAD_BYTES // (1024 * 1024)
+    return f"Файл больше {limit} МБ. Уменьшите его и загрузите снова."
+
+
+class SecurityHeaders:
+    """Добавляет защитные заголовки ко всем ответам."""
+
+    def __init__(self, inner: ASGIApp) -> None:
+        self.inner = inner
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        async def send_with_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+                headers["X-Content-Type-Options"] = "nosniff"
+                headers["Referrer-Policy"] = "no-referrer"
+            await send(message)
+
+        await self.inner(scope, receive, send_with_headers if scope["type"] == "http" else send)
+
+
+class BodySizeLimit:
+    """Останавливает слишком большой запрос до разбора multipart и записи на диск."""
+
+    def __init__(self, inner: ASGIApp) -> None:
+        self.inner = inner
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.inner(scope, receive, send)
+            return
+
+        limit = config.MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD
+        declared = Headers(scope=scope).get("content-length", "")
+        if declared.isdigit() and int(declared) > limit:
+            response = JSONResponse({"detail": _too_large_message()}, status_code=413)
+            await response(scope, receive, send)
+            return
+
+        received = 0
+
+        async def limited_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise HTTPException(413, _too_large_message())
+            return message
+
+        await self.inner(scope, limited_receive, send)
+
+
 app = FastAPI(title="Топоотчет", docs_url=None, redoc_url=None, openapi_url=None)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=config.ALLOWED_HOSTS)
+app.add_middleware(BodySizeLimit)
+app.add_middleware(SecurityHeaders)
 
 
-@app.middleware("http")
-async def security_headers(request: Request, call_next) -> Response:
-    response = await call_next(request)
-    response.headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
-    response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["Referrer-Policy"] = "no-referrer"
-    return response
+@dataclass(frozen=True)
+class StoredPage:
+    """Данные листа для отчета. Полный растр в памяти не хранится."""
+
+    number: int
+    width: int
+    height: int
+    dpi: float | None
+    rectified: bool
+    preview: bytes
 
 
 @dataclass
 class Analysis:
     id: str
     filename: str
-    document: Document
-    previews: dict[int, bytes]
+    pages: dict[int, StoredPage]
+    warnings: list[str]
 
 
 _analyses: OrderedDict[str, Analysis] = OrderedDict()
@@ -161,8 +226,13 @@ def _run_analysis(data: bytes, filename: str) -> dict:
     analysis = Analysis(
         id=uuid.uuid4().hex,
         filename=filename,
-        document=document,
-        previews={page.number: _preview(page) for page in document.pages},
+        pages={
+            page.number: StoredPage(
+                page.number, page.width, page.height, page.dpi, page.rectified, _preview(page)
+            )
+            for page in document.pages
+        },
+        warnings=document.warnings,
     )
     _store(analysis)
     return {
@@ -176,9 +246,10 @@ def _run_analysis(data: bytes, filename: str) -> dict:
                 "width": page.width,
                 "height": page.height,
                 "dpi": round(page.dpi, 1) if page.dpi else None,
+                "rectified": page.rectified,
                 "preview": f"/api/analyses/{analysis.id}/pages/{page.number}.jpg",
             }
-            for page in document.pages
+            for page in analysis.pages.values()
         ],
         "marks": [mark.to_dict() for mark in marks],
         "metadata": extract_metadata(all_items),
@@ -191,8 +262,7 @@ async def _read_limited(upload: UploadFile) -> bytes:
     while chunk := await upload.read(UPLOAD_CHUNK):
         total += len(chunk)
         if total > config.MAX_UPLOAD_BYTES:
-            limit = config.MAX_UPLOAD_BYTES // (1024 * 1024)
-            raise HTTPException(413, f"Файл больше {limit} МБ. Уменьшите его и загрузите снова.")
+            raise HTTPException(413, _too_large_message())
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -213,10 +283,10 @@ async def create_sample_analysis() -> dict:
 @app.get("/api/analyses/{analysis_id}/pages/{number}.jpg")
 def page_preview(analysis_id: str, number: int) -> Response:
     analysis = _get_analysis(analysis_id)
-    if number not in analysis.previews:
+    if number not in analysis.pages:
         raise HTTPException(404, "Такого листа нет.")
     return Response(
-        analysis.previews[number],
+        analysis.pages[number].preview,
         media_type="image/jpeg",
         headers={"Cache-Control": "private, max-age=3600"},
     )
@@ -244,10 +314,10 @@ def _compute(analysis: Analysis, review: ReviewInput) -> Computed:
     surface_page = _surface_page(included)
     slope, map_png = None, None
     if surface_page is not None:
-        page = next((p for p in analysis.document.pages if p.number == surface_page), None)
+        page = analysis.pages.get(surface_page)
         points = [mark for mark in included if mark.page == surface_page]
         if page is not None:
-            dpi = review.dpi or page.dpi
+            dpi = None if page.rectified else review.dpi or page.dpi
             metres = metres_per_pixel(dpi, scale_denominator(review.metadata.get("scale", "")))
             xs = [mark.x for mark in points]
             ys = [mark.y for mark in points]
@@ -286,12 +356,9 @@ def report(
     ]
 
     sheet = None
-    if computed.surface_page is not None:
-        page = next(
-            (p for p in analysis.document.pages if p.number == computed.surface_page), None
-        )
-        if page is not None:
-            sheet = annotated_sheet(page.image, numbered, computed.surface_page)
+    page = analysis.pages.get(computed.surface_page)
+    if page is not None:
+        sheet = annotated_sheet(page.preview, page.width, numbered, page.number)
 
     data = ReportData(
         filename=analysis.filename,
@@ -302,10 +369,10 @@ def report(
         excluded=sum(1 for mark in review.marks if not mark.included),
         edited=sum(1 for mark in computed.included if mark.status in ("manual", "edited")),
         unchecked=sum(1 for mark in computed.included if mark.status == "check"),
-        surface_page=computed.surface_page if len(analysis.document.pages) > 1 else None,
+        surface_page=computed.surface_page if len(analysis.pages) > 1 else None,
         sheet_jpeg=sheet,
         map_png=computed.map_png,
-        warnings=analysis.document.warnings,
+        warnings=analysis.warnings,
     )
     content = build_pdf(data) if format == "pdf" else build_docx(data)
     stem = Path(analysis.filename).stem or "план"

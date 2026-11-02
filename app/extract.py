@@ -39,6 +39,15 @@ class Mark:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class _Range:
+    low: float
+    high: float
+
+    def __contains__(self, value: float) -> bool:
+        return self.low <= value <= self.high
+
+
 @dataclass
 class _Candidate:
     value: float
@@ -91,21 +100,27 @@ def _candidates(page: Page, items: list[TextItem]) -> tuple[list[_Candidate], li
     return decimal, integers
 
 
-def _elevation_window(values: list[float]) -> tuple[float, float] | None:
-    """Находит самую многочисленную группу близких значений."""
+def _groups(ordered: list[float], limit: float) -> list[list[float]]:
+    groups = [[ordered[0]]]
+    for previous, value in zip(ordered, ordered[1:]):
+        if value - previous > limit:
+            groups.append([])
+        groups[-1].append(value)
+    return groups
+
+
+def _elevation_ranges(values: list[float]) -> tuple[_Range, _Range] | None:
+    """Возвращает основную группу отметок и более широкий диапазон для сверки."""
     if not values:
         return None
     ordered = sorted(values)
     gaps = [second - first for first, second in zip(ordered, ordered[1:])]
-    limit = max(config.ELEVATION_MIN_GAP_M, 4 * median(gaps)) if gaps else 0.0
+    typical_gap = 4 * median(gaps) if gaps else 0.0
 
-    groups = [[ordered[0]]]
-    for gap, value in zip(gaps, ordered[1:]):
-        if gap > limit:
-            groups.append([])
-        groups[-1].append(value)
-    largest = max(groups, key=len)
-    return largest[0], largest[-1]
+    core = max(_groups(ordered, max(config.ELEVATION_MIN_GAP_M, typical_gap)), key=len)
+    wide_groups = _groups(ordered, max(config.ELEVATION_REVIEW_GAP_M, typical_gap))
+    wide = next(group for group in wide_groups if core[0] in group)
+    return _Range(core[0], core[-1]), _Range(wide[0], wide[-1])
 
 
 def _distance_threshold(first: TextItem, second: TextItem) -> float:
@@ -113,7 +128,7 @@ def _distance_threshold(first: TextItem, second: TextItem) -> float:
 
 
 def _deduplicate(
-    candidates: list[_Candidate], low: float, high: float, dominant: int
+    candidates: list[_Candidate], allowed: _Range, dominant: int
 ) -> list[_Candidate]:
     """Объединяет чтения одной подписи: из разных проходов и соседних фрагментов.
 
@@ -122,7 +137,7 @@ def _deduplicate(
 
     def rank(candidate: _Candidate) -> tuple[bool, bool, bool, float]:
         return (
-            low <= candidate.value <= high,
+            candidate.value in allowed,
             candidate.decimals == dominant,
             not candidate.dot_restored,
             candidate.item.confidence,
@@ -147,17 +162,15 @@ def _deduplicate(
     return kept
 
 
-def _without_marker_digit(
-    candidates: list[_Candidate], low: float, high: float
-) -> list[_Candidate]:
+def _without_marker_digit(candidates: list[_Candidate], allowed: _Range) -> list[_Candidate]:
     """Проверяет версию числа без первой цифры: кружок точки иногда читается как 1 или 0."""
     fixed = []
     for candidate in candidates:
-        if candidate.item.source != "ocr" or low <= candidate.value <= high:
+        if candidate.item.source != "ocr" or candidate.value in allowed:
             continue
         text = _clean_number(candidate.item.text, "ocr").lstrip("+")
         shorter = text[1:]
-        if NUMBER.fullmatch(shorter) and low <= float(shorter) <= high:
+        if NUMBER.fullmatch(shorter) and float(shorter) in allowed:
             fixed.append(
                 _Candidate(
                     float(shorter),
@@ -178,27 +191,26 @@ def extract_marks(pages: list[tuple[Page, list[TextItem]]]) -> list[Mark]:
         decimal.extend(page_decimal)
         integers.extend(page_integers)
 
-    window = _elevation_window([candidate.value for candidate in decimal])
-    if window is None:
+    ranges = _elevation_ranges([candidate.value for candidate in decimal])
+    if ranges is None:
         return []
-    low, high = window
-    margin = max(1.0, (high - low) * 0.1)
-    restored = [
-        candidate for candidate in integers if low - margin <= candidate.value <= high + margin
-    ]
-    in_window = [c for c in decimal if low <= c.value <= high]
-    dominant = Counter(c.decimals for c in in_window).most_common(1)[0][0]
-    trimmed = _without_marker_digit(decimal, low, high)
+    core, wide = ranges
+    margin = max(1.0, (wide.high - wide.low) * 0.1)
+    expanded = _Range(wide.low - margin, wide.high + margin)
+    restored = [candidate for candidate in integers if candidate.value in expanded]
+    in_core = [candidate for candidate in decimal if candidate.value in core]
+    dominant = Counter(candidate.decimals for candidate in in_core).most_common(1)[0][0]
+    trimmed = _without_marker_digit(decimal, wide)
 
     marks = []
     for number, candidate in enumerate(
         sorted(
-            _deduplicate(decimal + restored + trimmed, low, high, dominant),
+            _deduplicate(decimal + restored + trimmed, wide, dominant),
             key=lambda c: (c.page, c.item.y, c.item.x),
         ),
         start=1,
     ):
-        status, note, included = _classify(candidate, low, high, dominant)
+        status, note, included = _classify(candidate, core, wide, dominant)
         marks.append(
             Mark(
                 id=number,
@@ -220,14 +232,16 @@ def extract_marks(pages: list[tuple[Page, list[TextItem]]]) -> list[Mark]:
 
 
 def _classify(
-    candidate: _Candidate, low: float, high: float, dominant: int
+    candidate: _Candidate, core: _Range, wide: _Range, dominant: int
 ) -> tuple[str, str, bool]:
     if candidate.dot_restored:
         return "check", "Точка восстановлена, сверьте с листом", True
-    if not low <= candidate.value <= high:
+    if candidate.value not in wide:
         return "doubtful", "Вне диапазона отметок листа: возможно, длина или площадь", False
     if candidate.decimals != dominant:
         return "doubtful", f"Другая точность: обычно {dominant} знака после запятой", False
+    if candidate.value not in core:
+        return "check", "Далеко от основной группы отметок, сверьте с листом", True
     if candidate.note:
         return "check", candidate.note, True
     if candidate.item.confidence < config.GOOD_CONFIDENCE:

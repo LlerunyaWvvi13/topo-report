@@ -17,6 +17,7 @@ from scipy.spatial import Delaunay, QhullError  # noqa: E402
 
 MIN_POINTS_FOR_SURFACE = 3
 MIN_TRIANGLE_QUALITY = 0.35
+FLAT_SLOPE = 1e-4
 EARTH_RAMP = LinearSegmentedColormap.from_list(
     "earth", ["#f4ece1", "#dcbf9d", "#bd8f62", "#93603a", "#5e3820"]
 )
@@ -54,7 +55,7 @@ class SlopeStats:
     mean_percent: float
     mean_degrees: float
     max_percent: float
-    direction: str
+    direction: str | None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -100,8 +101,10 @@ def slope_stats(
 
     (gradient_east, gradient_north, _), *_ = np.linalg.lstsq(design, heights, rcond=None)
     slope = math.hypot(gradient_east, gradient_north)
-    bearing = math.degrees(math.atan2(-gradient_east, -gradient_north)) % 360
-    direction = DIRECTIONS[int((bearing + 22.5) // 45) % 8]
+    direction = None
+    if slope >= FLAT_SLOPE:
+        bearing = math.degrees(math.atan2(-gradient_east, -gradient_north)) % 360
+        direction = DIRECTIONS[int((bearing + 22.5) // 45) % 8]
     return SlopeStats(
         mean_percent=round(slope * 100, 2),
         mean_degrees=round(math.degrees(math.atan(slope)), 2),
@@ -146,7 +149,10 @@ def _steepest_triangle(east: np.ndarray, north: np.ndarray, heights: np.ndarray)
 
 
 def _contour_levels(low: float, high: float, step: float | None) -> np.ndarray:
-    span = max(high - low, 1e-6)
+    span = high - low
+    if span <= 0:
+        padding = step or 0.5
+        return np.array([low - padding, low + padding])
     if not step or span / step > 60:
         step = float(np.round(span / 10, 2)) or span / 10
     first = math.floor(low / step) * step
@@ -188,13 +194,15 @@ def height_map_png(
     figure.patch.set_facecolor("white")
     filled = axes.contourf(grid_x, grid_y, surface, levels=levels, cmap=EARTH_RAMP)
     lines = axes.contour(grid_x, grid_y, surface, levels=levels, colors=INK, linewidths=0.45, alpha=0.65)
-    axes.clabel(lines, inline=True, fontsize=6.5, fmt=lambda level: f"{level:g}".replace(".", ","))
+    if heights.max() > heights.min():
+        axes.clabel(lines, inline=True, fontsize=6.5, fmt=lambda level: f"{level:g}".replace(".", ","))
     axes.scatter(east, north, s=11, c="white", edgecolors=INK, linewidths=0.7, zorder=3)
 
-    for label, index, offset in (
+    extremes = [
         ("наименьшая", int(heights.argmin()), (7, -11)),
         ("наибольшая", int(heights.argmax()), (7, 7)),
-    ):
+    ]
+    for label, index, offset in extremes if heights.max() > heights.min() else []:
         axes.scatter(east[index], north[index], s=46, c=INK, edgecolors="white", linewidths=1.2, zorder=4)
         axes.annotate(
             f"{label} {heights[index]:.2f}".replace(".", ","),
